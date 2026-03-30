@@ -1,0 +1,8 @@
+# Superlinked reads config.yaml from the process working directory.
+# Duplicate of repo-root config.yaml so Jupyter finds it when cwd is notebooks/.
+framework:
+  APP_ID: yelp-businesses-collection-00
+
+image: {}
+
+resource: {}

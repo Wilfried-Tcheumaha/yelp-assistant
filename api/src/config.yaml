@@ -1,0 +1,9 @@
+# Superlinked framework settings (see superlinked.framework.common.settings).
+# Qdrant collection name = framework.APP_ID
+framework:
+  APP_ID: yelp-businesses-collection-00
+
+image: {}
+
+resource: {}
+
