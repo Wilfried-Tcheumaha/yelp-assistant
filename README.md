@@ -7,6 +7,8 @@ This project implements a product-inspired Yelp assistant that answers user ques
 
 At runtime, the assistant is exposed as a small **FastAPI** service.
 
+Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
+
 ## What works (implemented)
 
 ### Structured + semantic retrieval (Superlinked)
@@ -71,6 +73,22 @@ This repo includes `docker-compose.yml` with:
 - The Docker image sets the cache to writable locations (e.g. under `/tmp`) for non-root execution.
 
 
+
+## Dataset files (notebooks input)
+
+The notebooks expect the Yelp Open Dataset JSON files to be placed under `data/raw/` (relative to the notebook folder).
+
+Common raw inputs used in `notebooks/01-explore-yelp-data.ipynb`:
+- `data/raw/yelp_academic_dataset_business.json`
+- `data/raw/yelp_academic_dataset_review.json`
+- `data/raw/yelp_academic_dataset_checkin.json`
+- `data/raw/yelp_academic_dataset_tip.json`
+- `data/raw/yelp_academic_dataset_user.json`
+
+The RAG pipeline notebooks use a preprocessed restaurant sample with hours, e.g.:
+- `data/raw/yelp_academic_dataset_business_restaurants_with_hours_sample_1000.json`
+
+To run the serving API, need to have the Qdrant collections populated (created/ingested from the notebooks).
 
 ## Roadmap (Next)
 - Photo embeddings / visual retrieval
