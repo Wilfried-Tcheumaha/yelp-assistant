@@ -36,11 +36,11 @@ executor_qdrant = sl.RestExecutor(
 )
 qdrant_app = executor_qdrant.run()
 
-def Retrieve_context(question, qdrant_app):
+def Retrieve_context(question, qdrant_app, k=5):
     qdrant_results = qdrant_app.query(
     query,
     natural_query=question,
-    limit=5,
+    limit=k,
 )
     format_minute_columns_to_hhmm(sl.PandasConverter.to_pandas(qdrant_results))
     return qdrant_results

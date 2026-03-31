@@ -20,5 +20,17 @@ services:
     restart: unless-stopped
     volumes:
       - ./api/src:/app/api/src
+
+  streamlit-app:
+    build:
+      context: .
+      dockerfile: chatbot_ui/Dockerfile
+    ports:
+      - 8501:8501
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./chatbot_ui/src:/app/chatbot_ui/src
   
 
