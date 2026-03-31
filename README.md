@@ -6,6 +6,7 @@ This project implements a product-inspired Yelp assistant that answers user ques
 - and generating a final response with **OpenAI** using the retrieved records as the input.
 
 At runtime, the assistant is exposed as a small **FastAPI** service.
+The project also includes a **Streamlit chat UI** for interactive usage.
 
 Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 
@@ -40,7 +41,6 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 ```json
 {
   "query": "Find Italian restaurants open at 7pm with outdoor seating in Paris",
-  "top_k": 5
 }
 ```
 
@@ -61,17 +61,20 @@ Notes:
 This repo includes `docker-compose.yml` with:
 - `qdrant`: Qdrant vector database
 - `api`: the FastAPI service
+- `streamlit-app`: the chat UI service
 
 1. Create your `.env` (see “Configuration” below).
 2. Start services:
    - `make run-docker-compose:`
-3. Call:
+3. Open:
+   - UI: `http://localhost:8501`
+   - API: `http://localhost:8000`
+4. Optional direct API call:
    - `POST http://localhost:8000/rag/`
 
 ### Model download/cache
 - Superlinked downloads `sentence-transformers/all-MiniLM-L6-v2` on first container startup (and then reuses the cached files).
 - The Docker image sets the cache to writable locations (e.g. under `/tmp`) for non-root execution.
-
 
 
 ## Dataset files (notebooks input)
