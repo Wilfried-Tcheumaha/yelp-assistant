@@ -19,8 +19,7 @@ def rag(
     result=rag_pipeline(payload.query)
     return RAGResponse(
         request_id=request.state.request_id,
-        answer=result
+        answer=result["answer"]
     )
-
 app = FastAPI()
 app.include_router(rag_router, prefix="/rag")

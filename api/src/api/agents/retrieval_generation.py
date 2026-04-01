@@ -1,5 +1,3 @@
-from api.core.config import config
-from qdrant_client import QdrantClient
 from superlinked import framework as sl
 import json
 import os
@@ -8,6 +6,7 @@ import openai
 from api.agents.superlinked_app.index import business_index, business
 from api.agents.superlinked_app.query import query
 from api.agents.superlinked_app.utils.utils import *
+from langsmith import traceable, get_current_run_tree
 
 qdrant_vdb = sl.QdrantVectorDatabase(
     url="http://qdrant:6333",
@@ -36,16 +35,25 @@ executor_qdrant = sl.RestExecutor(
 )
 qdrant_app = executor_qdrant.run()
 
+@traceable(
+    name="Retrieve_context",
+    run_type="embedding",
+    metadata={"ls_nlq_provider": "openai", "ls_nlq_model": "gpt-4o-mini","ls_nlq_embedding_provider": "huggingface ", "ls_nlq_embedding_model": "sentence-transformers/all-MiniLM-L6-v2"}
+)
 def Retrieve_context(question, qdrant_app, k=5):
     qdrant_results = qdrant_app.query(
     query,
     natural_query=question,
     limit=k,
 )
+
     format_minute_columns_to_hhmm(sl.PandasConverter.to_pandas(qdrant_results))
     return qdrant_results
 
-
+@traceable(
+    name="_result_to_restaurants",
+    run_type="prompt"
+)
 def _result_to_restaurants(result) -> list[dict[str, Any]]:
     df_columns = ["business_id", "name", "address", "city", "state", "postal_code", "latitude", "longitude", "stars", "review_count", "is_open", "categories", "attributes", "hours"]
     df = sl.PandasConverter.to_pandas(result).rename(columns={"id": "business_id"})
@@ -73,6 +81,10 @@ def _result_to_restaurants(result) -> list[dict[str, Any]]:
             df[c] = {}
     return df.reindex(columns=df_columns).to_dict(orient="records")
 
+@traceable(
+    name="build_prompt",
+    run_type="prompt"
+)
 def build_prompt(preprocessed_context, question):
     prompt=f"""
     You are a yelp shopping assistant that can answer question about the restaurants.
@@ -92,17 +104,40 @@ def build_prompt(preprocessed_context, question):
 
     return prompt
 
+@traceable(
+    name="generate_answer",
+    run_type="llm",
+    metadata={"ls_provider": "openai", "ls_model": "gpt-5-nano"}
+)
 def generate_answer(prompt):
     response = openai.chat.completions.create(
         model="gpt-5-nano",
         messages=[{"role":"system", "content": prompt}],
         reasoning_effort="medium"
     )
+    current_run = get_current_run_tree()
+    u = getattr(response, "usage", None)
+    if current_run is not None and u is not None:
+        current_run.metadata["usage_metadata"] = {
+            "input_tokens": getattr(u, "prompt_tokens", None) or getattr(u, "input_tokens", None) or 0,
+            "output_tokens": getattr(u, "completion_tokens", None) or getattr(u, "output_tokens", None) or 0,
+            "total_tokens": getattr(u, "total_tokens", None) or 0,
+        }
     return response.choices[0].message.content
 
+@traceable(
+    name="rag_pipeline"
+)
 def rag_pipeline(question):
     context=Retrieve_context(question, qdrant_app)
     preprocessed_context=_result_to_restaurants(context)
     prompt=build_prompt(preprocessed_context, question)
     answer=generate_answer(prompt)
-    return answer
+
+    return {
+        "answer": answer,
+        "question": question,
+        "retrieved_context_ids": [e.id for e in context.entries],
+        "retrieved_restaurant_names": [e.fields.get("name") for e in context.entries],
+        "similarity_score": [e.metadata.score for e in context.entries],
+    }

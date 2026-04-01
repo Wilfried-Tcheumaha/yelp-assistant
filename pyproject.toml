@@ -18,6 +18,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "langsmith>=0.7.23",
     "matplotlib>=3.10.8",
     "qdrant-client>=1.17.1",
     "sentence-transformers>=3.0.0",
