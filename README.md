@@ -32,6 +32,18 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
   - `openai.chat.completions.create(model="gpt-5-nano", ...)`
 - The model is instructed to answer based on the provided retrieved business records.
 
+### Observability (LangSmith)
+- The API uses [LangSmith](https://smith.langchain.com/) via the `langsmith` SDK (`@traceable` on the RAG steps in `api/src/api/agents/retrieval_generation.py`).
+- Each `POST /rag/` request can produce a trace tree such as:
+  - `rag_pipeline` → `Retrieve_context` → `_result_to_restaurants` → `build_prompt` → `generate_answer`
+- When OpenAI returns usage on the completion, the **`generate_answer`** run records **`usage_metadata`** on the LangSmith run (`input_tokens`, `output_tokens`, `total_tokens`).
+- Enable tracing by setting the standard LangSmith environment variables (see `env.example`):
+  - `LANGSMITH_TRACING=true`
+  - `LANGSMITH_API_KEY` (from your LangSmith account)
+  - `LANGSMITH_PROJECT` (project name in LangSmith)
+  - `LANGSMITH_ENDPOINT` (optional; defaults to the public LangSmith API)
+- Docker Compose loads `.env` into the `api` service, so the same variables apply in containers.
+
 ## API
 
 ### Endpoint
@@ -63,7 +75,7 @@ This repo includes `docker-compose.yml` with:
 - `api`: the FastAPI service
 - `streamlit-app`: the chat UI service
 
-1. Create your `.env` (see “Configuration” below).
+1. Create your `.env` from `env.example` (OpenAI key, optional LangSmith vars, etc.).
 2. Start services:
    - `make run-docker-compose:`
 3. Open:
