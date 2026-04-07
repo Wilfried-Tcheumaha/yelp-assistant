@@ -1,15 +1,18 @@
+import api.patches.instructor_compat  # noqa: F401 — Superlinked NLQ vs instructor 1.14+ API
+
 from superlinked import framework as sl
 import json
 import os
 from typing import Any
 import openai
+from api.agents.qdrant_url import resolve_qdrant_url
 from api.agents.superlinked_app.index import business_index, business
 from api.agents.superlinked_app.query import query
 from api.agents.superlinked_app.utils.utils import *
 from langsmith import traceable, get_current_run_tree
 
 qdrant_vdb = sl.QdrantVectorDatabase(
-    url="http://qdrant:6333",
+    url=resolve_qdrant_url(),
     # Superlinked's QdrantVectorDatabase currently requires an api_key arg.
     # For local Qdrant this is typically unused, so we default to empty.
     api_key=os.getenv("QDRANT_API_KEY", ""),
@@ -33,7 +36,16 @@ executor_qdrant = sl.RestExecutor(
     vector_database=qdrant_vdb,
     queries=[business_rest_query],
 )
-qdrant_app = executor_qdrant.run()
+
+_qdrant_app = None
+
+
+def get_qdrant_app():
+    """Lazy init: avoids Qdrant TCP on import (e.g. eval scripts importing rag_pipeline)."""
+    global _qdrant_app
+    if _qdrant_app is None:
+        _qdrant_app = executor_qdrant.run()
+    return _qdrant_app
 
 @traceable(
     name="Retrieve_context",
@@ -128,8 +140,9 @@ def generate_answer(prompt):
 @traceable(
     name="rag_pipeline"
 )
-def rag_pipeline(question):
-    context=Retrieve_context(question, qdrant_app)
+def rag_pipeline(question, qdrant_app=None):
+    app = qdrant_app if qdrant_app is not None else get_qdrant_app()
+    context = Retrieve_context(question, app)
     preprocessed_context=_result_to_restaurants(context)
     prompt=build_prompt(preprocessed_context, question)
     answer=generate_answer(prompt)

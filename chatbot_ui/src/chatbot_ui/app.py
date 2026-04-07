@@ -49,8 +49,13 @@ if prompt := st.chat_input("Enter your message..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        output=api_call("post", f"{config.API_URL}/rag", json={"query": prompt})
-        response_data=output[1]
-        answer=response_data["answer"]
+        url = f"{config.API_URL.rstrip('/')}/rag/"
+        ok, data = api_call("post", url, json={"query": prompt})
+        # Success: API returns {"answer", "request_id"}. Errors: {"detail": ...} — no "answer" key.
+        if ok:
+            answer = data.get("answer", "")
+        else:
+            err = data.get("detail", data.get("message", "Request failed"))
+            answer = err if isinstance(err, str) else str(err)
         st.write(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer})
