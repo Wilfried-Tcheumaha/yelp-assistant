@@ -10,6 +10,20 @@ from api.agents.superlinked_app.index import business_index, business
 from api.agents.superlinked_app.query import query
 from api.agents.superlinked_app.utils.utils import *
 from langsmith import traceable, get_current_run_tree
+from pydantic import BaseModel, Field
+import instructor
+import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+
+class RAGUsedContext (BaseModel):
+    id: str = Field(description="The id of the restaurants used to answer the question")
+    description: str = Field(description="A short description of the business")
+
+class RAGGenerationResponse(BaseModel):
+    answer: str = Field(description="The answer to the question")
+    references: list[RAGUsedContext]=Field(description="The context used to answer the question")
 
 qdrant_vdb = sl.QdrantVectorDatabase(
     url=resolve_qdrant_url(),
@@ -104,8 +118,14 @@ def build_prompt(preprocessed_context, question):
     Instructions:
     - You need to answer questions based on the provided context only
     - Never use the word context and rfer to it as the available businesses or amenities
-    - respond naturally and provide as much details as possible to the user request 
-    - Refrain from using filter sush as is_open =True ...Rather say open today
+   - As an output you need to provide:
+
+    * The answer to the question based on the provided context.
+    * The list of the IDs of the chunks that were used to answer the question. Only return the ones that are used in the answer.
+    * Short description (1-2 sentences) of the item based on the description provided in the context.
+
+    - The short description should have the name of the restaurant.
+    - The answer to the question should contain detailed information about the restaurant and returned with detailed specification in bullet points. Don't include the address in the answer.
 
     Context:
     {preprocessed_context}
@@ -119,23 +139,25 @@ def build_prompt(preprocessed_context, question):
 @traceable(
     name="generate_answer",
     run_type="llm",
-    metadata={"ls_provider": "openai", "ls_model": "gpt-5-nano"}
+    metadata={"ls_provider": "openai", "ls_model": "gpt-4.1-mini"}
 )
 def generate_answer(prompt):
-    response = openai.chat.completions.create(
-        model="gpt-5-nano",
+    client = instructor.from_openai(openai.OpenAI())
+    response, raw_response = client.chat.completions.create_with_completion(
+        model="gpt-4.1-mini",
         messages=[{"role":"system", "content": prompt}],
-        reasoning_effort="medium"
+        temperature=0,
+        response_model=RAGGenerationResponse
     )
     current_run = get_current_run_tree()
-    u = getattr(response, "usage", None)
+    u = getattr(raw_response, "usage", None)
     if current_run is not None and u is not None:
         current_run.metadata["usage_metadata"] = {
             "input_tokens": getattr(u, "prompt_tokens", None) or getattr(u, "input_tokens", None) or 0,
             "output_tokens": getattr(u, "completion_tokens", None) or getattr(u, "output_tokens", None) or 0,
             "total_tokens": getattr(u, "total_tokens", None) or 0,
         }
-    return response.choices[0].message.content
+    return response
 
 @traceable(
     name="rag_pipeline"
@@ -148,9 +170,64 @@ def rag_pipeline(question, qdrant_app=None):
     answer=generate_answer(prompt)
 
     return {
-        "answer": answer,
+        "answer": answer.answer,
+        "references": answer.references,
         "question": question,
         "retrieved_context_ids": [e.id for e in context.entries],
         "retrieved_restaurant_names": [e.fields.get("name") for e in context.entries],
         "similarity_score": [e.metadata.score for e in context.entries],
+    }
+
+def rag_pipeline_wrapper(question, top_k=5):
+   
+
+    app = get_qdrant_app()
+    result = rag_pipeline(question, app)
+
+    # Superlinked stores the Yelp id under `__object_id__` (the actual Qdrant point id
+    # is a derived UUID), so we filter on the payload field rather than retrieve(ids=...).
+    raw_client = QdrantClient(
+        url=resolve_qdrant_url(),
+        api_key=os.getenv("QDRANT_API_KEY", ""),
+    )
+    collection = os.getenv("QDRANT_COLLECTION", "yelp-businesses-collection-00")
+
+    def _maybe_json(v):
+        if isinstance(v, str) and v.strip():
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return v
+        return v
+
+    used_context = []
+    for item in result.get("references", []):
+        points, _ = raw_client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="__object_id__", match=MatchValue(value=item.id))]
+            ),
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        payload = points[0].payload if points else {}
+
+        used_context.append({
+            "id": item.id,
+            "description": item.description,
+            "name": payload.get("__schema_field__Business_name"),
+            "address": payload.get("__schema_field__Business_address"),
+            "latitude": payload.get("__schema_field__Business_latitude"),
+            "longitude": payload.get("__schema_field__Business_longitude"),
+            "stars": payload.get("__schema_field__Business_stars"),
+            "reviews": payload.get("__schema_field__Business_review_count"),
+            "categories": payload.get("__schema_field__Business_category_tags"),
+            "attributes": _maybe_json(payload.get("__schema_field__Business_attributes")),
+            "hours": _maybe_json(payload.get("__schema_field__Business_hours")),
+        })
+
+    return {
+        "answer": result["answer"],
+        "used_context": used_context,
     }

@@ -17,6 +17,7 @@ dependencies = [
     "superlinked-server>=1.56.4",
     "uvicorn>=0.35.0",
     "langsmith>=0.7.23",
+    "instructor>=1.14.5",
 ]
 
 [build-system]

@@ -27,10 +27,20 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
   - and `QdrantVectorDatabase` pointing at `http://qdrant:6333`.
 - The API transforms the Qdrant result payload into a list of business dictionaries (parses JSON strings for `attributes` and `hours`).
 
-### Response generation (OpenAI)
-- The assistant builds a prompt from the retrieved businesses and calls:
-  - `openai.chat.completions.create(model="gpt-5-nano", ...)`
-- The model is instructed to answer based on the provided retrieved business records.
+### Response generation (OpenAI + Instructor)
+- The assistant builds a prompt from the retrieved businesses and calls OpenAI via [`instructor`](https://github.com/jxnl/instructor) to get a **structured** response:
+  - `instructor.from_openai(openai.OpenAI()).chat.completions.create_with_completion(model="gpt-4.1-mini", response_model=RAGGenerationResponse, ...)`
+  - `RAGGenerationResponse` returns both the free-text `answer` and a typed list of `references` (business id + short description) actually used in the answer.
+- After generation, `rag_pipeline_wrapper` re-hydrates each reference by fetching the full Qdrant payload (via `__object_id__`) and returns a `used_context` list containing `name`, `address`, `latitude`, `longitude`, `stars`, `reviews`, `categories`, `attributes`, and `hours`. This is what powers the UI cards + map.
+
+### Streamlit UI (`chatbot_ui/`)
+- Chat column on the left; **right-side column shows a pydeck map** with numbered red pins for every suggested restaurant that has valid coordinates.
+- Sidebar renders a **Yelp-style business card** per suggestion:
+  - orange star chips for the rating, review count,
+  - live **Open / Closed** status computed from `hours` (handles overnight ranges and next-open time),
+  - category tags,
+  - clickable address that deep-links to `https://www.yelp.com/search?find_desc=<name>&find_loc=<address>`.
+- UI rendering helpers live in `chatbot_ui/src/chatbot_ui/utils/` (`business_card.py`, `restaurants_map.py`).
 
 ### Observability (LangSmith)
 - The API uses [LangSmith](https://smith.langchain.com/) via the `langsmith` SDK (`@traceable` on the RAG steps in `api/src/api/agents/retrieval_generation.py`).
@@ -60,13 +70,28 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 ```json
 {
   "request_id": "uuid-string",
-  "answer": "assistant response text"
+  "answer": "assistant response text",
+  "used_context": [
+    {
+      "id": "business_id",
+      "description": "short description of the restaurant",
+      "name": "Joe's Pizza",
+      "address": "123 Main St, Paris",
+      "latitude": 48.8566,
+      "longitude": 2.3522,
+      "stars": 4.5,
+      "reviews": 312,
+      "categories": ["Pizza", "Italian"],
+      "attributes": { "OutdoorSeating": true },
+      "hours": { "Monday": "11:0-22:0" }
+    }
+  ]
 }
 ```
 
 Notes:
-- `top_k` exists in the request model, but the current retrieval implementation uses a fixed limit (see `api/src/api/agents/retrieval_generation.py`).
-- The response is grounded in retrieved **business fields**; the current code does not attach explicit citations.
+- Retrieval currently uses a fixed `k=5` limit (see `Retrieve_context` in `api/src/api/agents/retrieval_generation.py`).
+- `used_context` only includes the businesses the LLM actually cited (via the `instructor`-typed `references` field), re-hydrated with full Qdrant payloads.
 
 ## Docker / local run
 
@@ -109,7 +134,7 @@ To run the serving API, need to have the Qdrant collections populated (created/i
 - Photo embeddings / visual retrieval
 - real-time website search
 - review-text sentiment retrieval
-- explicit “citations” attached to reviews/photos 
+- explicit "citations" attached to reviews/photos
 - Multiturn conversations
 - Recommendations
 - Turn the solution into Voice agent
