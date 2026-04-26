@@ -15,6 +15,7 @@ import instructor
 import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
+from api.agents.utils.prompt_management import prompt_template_config
 
 
 class RAGUsedContext (BaseModel):
@@ -112,29 +113,10 @@ def _result_to_restaurants(result) -> list[dict[str, Any]]:
     run_type="prompt"
 )
 def build_prompt(preprocessed_context, question):
-    prompt=f"""
-    You are a yelp shopping assistant that can answer question about the restaurants.
-    You will be given a question and a list of context.
-    Instructions:
-    - You need to answer questions based on the provided context only
-    - Never use the word context and rfer to it as the available businesses or amenities
-   - As an output you need to provide:
 
-    * The answer to the question based on the provided context.
-    * The list of the IDs of the chunks that were used to answer the question. Only return the ones that are used in the answer.
-    * Short description (1-2 sentences) of the item based on the description provided in the context.
-
-    - The short description should have the name of the restaurant.
-    - The answer to the question should contain detailed information about the restaurant and returned with detailed specification in bullet points. Don't include the address in the answer.
-
-    Context:
-    {preprocessed_context}
-
-    Question:
-    {question}
-    """
-
-    return prompt
+    template = prompt_template_config('api/agents/prompts/retrieval_generation.yaml', 'retrieval_generation')
+    rendered_prompt= template.render(preprocessed_context=preprocessed_context, question=question)
+    return rendered_prompt
 
 @traceable(
     name="generate_answer",
