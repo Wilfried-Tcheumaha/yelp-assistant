@@ -18,8 +18,17 @@ dependencies = [
     "uvicorn>=0.35.0",
     "langsmith>=0.7.23",
     "instructor>=1.14.5",
+    "langgraph>=1.1.6",
+    "psycopg-binary>=3.3.4",
+    "psycopg2-binary>=2.9.12",
+    "langgraph-checkpoint-postgres>=3.0.5",
 ]
 
 [build-system]
 requires = ["uv_build>=0.9.24,<0.10.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "psycopg-binary>=3.3.4",
+]

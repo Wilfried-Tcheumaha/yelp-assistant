@@ -1,9 +1,12 @@
-# Yelp Assistant (Structured RAG with Superlinked + Qdrant)
+# Yelp Assistant (Agentic RAG with LangGraph + Superlinked + Qdrant)
 
-This project implements a product-inspired Yelp assistant that answers user questions by:
-- orchestrating a **hybrid structured search** over Yelp business records (semantic similarity + numeric similarity + hard filters),
-- retrieving grounded business fields from **Qdrant**,
-- and generating a final response with **OpenAI** using the retrieved records as the input.
+This project implements a product-inspired Yelp assistant that answers user questions through an **agentic RAG workflow**:
+- an **intent router** filters off-topic questions before any retrieval happens,
+- a **tool-calling QA agent** decides when (and how) to search the business catalog,
+- the retrieval tool runs a **hybrid structured search** over Yelp business records (semantic similarity + numeric similarity + hard filters) backed by **Superlinked** + **Qdrant**,
+- and the agent generates the final response with **OpenAI**, citing the businesses it actually used.
+
+The whole graph is orchestrated with **LangGraph** and persisted across turns with a **Postgres** checkpointer, enabling **multi-turn conversations**.
 
 At runtime, the assistant is exposed as a small **FastAPI** service.
 The project also includes a **Streamlit chat UI** for interactive usage.
@@ -12,28 +15,56 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 
 ## What works (implemented)
 
-### Structured + semantic retrieval (Superlinked)
-- A Superlinked **schema** (`Business`) defines the available business fields (name/address/location, stars/review_count, amenities flags, category tags, and opening hours).
+### Agentic workflow (LangGraph)
+The graph is defined in `api/src/api/agents/graph.py` and has three nodes plus conditional routing:
+
+```
+START
+  └─> intent_router_node
+        ├─ question_relevant=False ─> END
+        └─ question_relevant=True  ─> agent_node
+                                       ├─ final_answer=True or iteration>2 ─> END
+                                       ├─ tool_calls present ─> tool_node ─> agent_node (loop)
+                                       └─ no tool calls ─> END
+```
+
+- **`intent_router_node`** (`agents/agents.py`): a small `gpt-4.1-mini` call (via `instructor`) that returns `IntentRouterResponse(question_relevant: bool, answer: str)`. Off-topic questions short-circuit straight to `END` with a polite refusal, so we never spend tokens on retrieval/generation for irrelevant queries.
+- **`agent_node`** (`agents/agents.py`): the main QA agent. It reads the available tool descriptions from state, runs `gpt-4.1-mini` with `instructor` against the `AgentResponse` schema, and emits any combination of `tool_calls`, an `answer`, structured `references`, and a `final_answer` boolean.
+- **`tool_node`**: a LangGraph `ToolNode` wired with the `get_formatted_context` tool, which is the structured retriever (see below).
+- **`tool_router`**: stops the loop when `final_answer=True`, when `iteration > 2` (safety cap), or when there are no pending tool calls.
+
+State is a Pydantic `State` model with reducer-merged `messages` and `references` (`Annotated[..., add]`), plus `iteration`, `final_answer`, and `available_tools`.
+
+### Multi-turn conversations (Postgres checkpointer)
+- Every request carries a `thread_id` (generated client-side, e.g. by Streamlit per session).
+- `agent_execution` opens a `PostgresSaver.from_conn_string(...)` and compiles the graph with that checkpointer, so each turn resumes the prior graph state for the same `thread_id`.
+- The Postgres service is part of `docker-compose.yml` (`langgraph_user` / `langgraph_db`), and its data lives under `./postgres_data`.
+
+### Structured + semantic retrieval (Superlinked + Qdrant)
+The retrieval tool (`api/src/api/agents/tools.py`) is exposed to the agent as `get_formatted_context(query: str, top_k: int = 5) -> str`:
+- A Superlinked **schema** (`Business`) defines the available business fields (name/address/location, stars/review_count, amenities flags, category tags, opening hours).
 - A Superlinked **index** combines:
   - `TextSimilaritySpace` using `sentence-transformers/all-MiniLM-L6-v2` for category semantic matching,
   - `NumberSpace` for `review_count` and `stars`,
   - and returns business metadata stored in Qdrant.
-- A Superlinked **natural-language interface** uses OpenAI to convert the user question into structured query parameters (e.g. city, rating ranges, open/closed constraints, amenity flags, and time-of-day open/close filters).
-
-### Qdrant-backed context
-- Retrieval uses a Superlinked `RestExecutor` with:
+- A Superlinked **natural-language query interface** uses OpenAI to convert the (possibly rewritten) user query into structured query parameters (city, rating ranges, open/closed constraints, amenity flags, time-of-day open/close filters, etc.).
+- Retrieval runs through a Superlinked `RestExecutor` with:
   - `RestSource` over the `Business` schema,
   - `RestQuery` targeting `business_search`,
   - and `QdrantVectorDatabase` pointing at `http://qdrant:6333`.
-- The API transforms the Qdrant result payload into a list of business dictionaries (parses JSON strings for `attributes` and `hours`).
+- The Qdrant app is **lazy-initialized** (`get_qdrant_app`) so we don't open a Qdrant connection at import time.
+- The tool returns the top-k results as a compact, formatted string of `id / name / rating / review_count / state / city / similarity_score` lines — designed to be cheap to feed back into the agent's next step.
 
-### Response generation (OpenAI + Instructor)
-- The assistant builds a prompt from the retrieved businesses and calls OpenAI via [`instructor`](https://github.com/jxnl/instructor) to get a **structured** response:
-  - `instructor.from_openai(openai.OpenAI()).chat.completions.create_with_completion(model="gpt-4.1-mini", response_model=RAGGenerationResponse, ...)`
-  - `RAGGenerationResponse` returns both the free-text `answer` and a typed list of `references` (business id + short description) actually used in the answer.
-- After generation, `rag_pipeline_wrapper` re-hydrates each reference by fetching the full Qdrant payload (via `__object_id__`) and returns a `used_context` list containing `name`, `address`, `latitude`, `longitude`, `stars`, `reviews`, `categories`, `attributes`, and `hours`. This is what powers the UI cards + map.
+### Response generation (OpenAI + Instructor, structured)
+- The agent uses [`instructor`](https://github.com/jxnl/instructor) to get a **structured** completion typed as `AgentResponse`:
+  - `answer: str` — free-text response,
+  - `references: list[RAGUsedContext]` — typed list of business ids + short descriptions actually used,
+  - `final_answer: bool` — whether the agent is done,
+  - `tool_calls: list[ToolCall]` — any tools the agent wants to invoke next.
+- After the graph returns, `yelp_agent_wrapper` re-hydrates each cited reference by querying Qdrant directly via `QdrantClient.scroll` on `__object_id__`, returning a `used_context` list with `name`, `address`, `latitude`, `longitude`, `stars`, `reviews`, `categories`, `attributes`, and `hours`. This is what powers the UI cards + map.
 
 ### Streamlit UI (`chatbot_ui/`)
+- A persistent `session_id` (UUID) is created per browser session and sent as `thread_id` on every request, enabling multi-turn memory through the Postgres checkpointer.
 - Chat column on the left; **right-side column shows a pydeck map** with numbered red pins for every suggested restaurant that has valid coordinates.
 - Sidebar renders a **Yelp-style business card** per suggestion:
   - orange star chips for the rating, review count,
@@ -43,10 +74,9 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 - UI rendering helpers live in `chatbot_ui/src/chatbot_ui/utils/` (`business_card.py`, `restaurants_map.py`).
 
 ### Observability (LangSmith)
-- The API uses [LangSmith](https://smith.langchain.com/) via the `langsmith` SDK (`@traceable` on the RAG steps in `api/src/api/agents/retrieval_generation.py`).
+- The API uses [LangSmith](https://smith.langchain.com/) via the `langsmith` SDK (`@traceable` on the intent router and the retrieval steps).
 - Each `POST /rag/` request can produce a trace tree such as:
-  - `rag_pipeline` → `Retrieve_context` → `_result_to_restaurants` → `build_prompt` → `generate_answer`
-- When OpenAI returns usage on the completion, the **`generate_answer`** run records **`usage_metadata`** on the LangSmith run (`input_tokens`, `output_tokens`, `total_tokens`).
+  - `agent_execution` → `intent_router_node` → `agent_node` → `retriever_top_n` → `format_retrieved_context` → `agent_node` (final)
 - Enable tracing by setting the standard LangSmith environment variables (see `env.example`):
   - `LANGSMITH_TRACING=true`
   - `LANGSMITH_API_KEY` (from your LangSmith account)
@@ -63,8 +93,11 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 ```json
 {
   "query": "Find Italian restaurants open at 7pm with outdoor seating in Paris",
+  "thread_id": "session-uuid-string"
 }
 ```
+
+`thread_id` identifies the conversation. Reusing the same `thread_id` across requests gives you a multi-turn conversation (state restored from the Postgres checkpointer); using a new `thread_id` starts a fresh conversation.
 
 ### Response body
 ```json
@@ -90,29 +123,58 @@ Yelp dataset: https://business.yelp.com/data/resources/open-dataset/
 ```
 
 Notes:
-- Retrieval currently uses a fixed `k=5` limit (see `Retrieve_context` in `api/src/api/agents/retrieval_generation.py`).
+- The retrieval tool defaults to `top_k=5` but the agent can request a different `top_k` per call.
+- The graph caps the agent loop at `iteration > 2` to avoid runaway tool use.
 - `used_context` only includes the businesses the LLM actually cited (via the `instructor`-typed `references` field), re-hydrated with full Qdrant payloads.
+- Off-topic questions are answered directly by the intent router and return an empty `used_context`.
 
 ## Docker / local run
 
 This repo includes `docker-compose.yml` with:
-- `qdrant`: Qdrant vector database
+- `qdrant`: Qdrant vector database (`./qdrant_storage` volume)
+- `postgres`: Postgres 16 for the LangGraph checkpointer (`./postgres_data` volume)
 - `api`: the FastAPI service
 - `streamlit-app`: the chat UI service
 
 1. Create your `.env` from `env.example` (OpenAI key, optional LangSmith vars, etc.).
 2. Start services:
-   - `make run-docker-compose:`
+   - `make run-docker-compose`
 3. Open:
    - UI: `http://localhost:8501`
    - API: `http://localhost:8000`
 4. Optional direct API call:
-   - `POST http://localhost:8000/rag/`
+   - `POST http://localhost:8000/rag/` with `{"query": "...", "thread_id": "..."}`
 
 ### Model download/cache
 - Superlinked downloads `sentence-transformers/all-MiniLM-L6-v2` on first container startup (and then reuses the cached files).
 - The Docker image sets the cache to writable locations (e.g. under `/tmp`) for non-root execution.
 
+## Repository layout (selected)
+
+```
+api/src/api/
+  agents/
+    graph.py              # LangGraph workflow + State + agent_execution + yelp_agent_wrapper
+    agents.py             # intent_router_node, agent_node, structured response models
+    tools.py              # get_formatted_context (Superlinked + Qdrant retrieval tool)
+    prompts/
+      intent_router_agent.yaml
+      qa_agent.yaml
+    superlinked_app/      # Business schema, index, NL query definition
+    utils/                # tool descriptions, prompt management, formatting helpers
+  api/
+    endpoints.py          # POST /rag/
+    models.py             # RAGRequest, RAGResponse, RAGUsedContext
+chatbot_ui/src/chatbot_ui/
+  app.py                  # Streamlit chat + map + sidebar suggestions
+  utils/                  # business_card.py, restaurants_map.py, css
+notebooks/
+  09-Query-Rewriting.ipynb
+  10-Router.ipynb
+  11-Single-turn-agent.ipynb
+  12-Multiturn-Agent.ipynb
+docker-compose.yml        # qdrant + api + streamlit-app + postgres
+```
 
 ## Dataset files (notebooks input)
 
@@ -128,14 +190,13 @@ Common raw inputs used in `notebooks/01-explore-yelp-data.ipynb`:
 The RAG pipeline notebooks use a preprocessed restaurant sample with hours, e.g.:
 - `data/raw/yelp_academic_dataset_business_restaurants_with_hours_sample_1000.json`
 
-To run the serving API, need to have the Qdrant collections populated (created/ingested from the notebooks).
+To run the serving API, you need to have the Qdrant collections populated (created/ingested from the notebooks).
 
 ## Roadmap (Next)
 - Photo embeddings / visual retrieval
-- real-time website search
-- review-text sentiment retrieval
-- explicit "citations" attached to reviews/photos
-- Multiturn conversations
+- Real-time website search
+- Review-text sentiment retrieval
+- Explicit "citations" attached to reviews/photos
 - Recommendations
-- Turn the solution into Voice agent
+- Turn the solution into a Voice agent
 - Deployment

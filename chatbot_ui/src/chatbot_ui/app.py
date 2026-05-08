@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 from chatbot_ui.core.config import config
 from chatbot_ui.utils import YELP_STARS_CSS, render_business_card, render_restaurants_map
+import uuid
 
 st.set_page_config(
     page_title="Yelp Assistant", 
@@ -11,7 +12,12 @@ st.set_page_config(
 
 st.markdown(YELP_STARS_CSS, unsafe_allow_html=True)
 
+def get_session_id():
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    return st.session_state.session_id
 
+session_id = get_session_id()
 
 def api_call(method, url, **kwargs):
     def _show_error_popup(message):
@@ -85,7 +91,7 @@ if prompt := st.chat_input("Enter your message..."):
 
         with st.chat_message("assistant"):
             url = f"{config.API_URL.rstrip('/')}/rag/"
-            ok, data = api_call("post", url, json={"query": prompt})
+            ok, data = api_call("post", url, json={"query": prompt, "thread_id": session_id})
 
             st.session_state.used_context = data.get("used_context", [])
             # Success: API returns {"answer", "used_context"}. Errors: {"detail": ...}.

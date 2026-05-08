@@ -19,8 +19,11 @@ dependencies = [
 [dependency-groups]
 dev = [
     "langgraph>=1.1.6",
+    "langgraph-checkpoint-postgres>=3.0.5",
     "langsmith>=0.7.23",
     "matplotlib>=3.10.8",
+    "psycopg-binary>=3.3.4",
+    "psycopg2-binary>=2.9.12",
     "qdrant-client>=1.17.1",
     "ragas>=0.4.3",
     "sentence-transformers>=3.0.0",

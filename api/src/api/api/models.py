@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 
 class RAGRequest(BaseModel):
     query: str = Field(..., description="The question to ask the RAG pipeline")
+    thread_id: str = Field(..., description="The thread ID of the conversation")
 
 class RAGUsedContext(BaseModel):
     id: str = Field(..., description="The id of the restaurant used to answer the question")

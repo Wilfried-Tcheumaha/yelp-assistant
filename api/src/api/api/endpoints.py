@@ -1,7 +1,7 @@
 from fastapi import APIRouter, FastAPI, Request
 import logging
 
-from api.agents.retrieval_generation import rag_pipeline_wrapper
+from api.agents.graph import yelp_agent_wrapper
 from api.api.models import RAGRequest, RAGResponse, RAGUsedContext
 
 logging.basicConfig(
@@ -18,7 +18,7 @@ def rag(
     request: Request,
     payload: RAGRequest
 )->RAGResponse:
-    result = rag_pipeline_wrapper(payload.query)
+    result = yelp_agent_wrapper(payload.query,payload.thread_id)
     return RAGResponse(
         request_id=request.state.request_id,
         answer=result["answer"],
