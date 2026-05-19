@@ -33,7 +33,7 @@ class State(BaseModel):
     tool_calls: List[ToolCall] = []
     final_answer: bool = False
     references: Annotated[List[RAGUsedContext], add] = []
-
+    trace_id: str = ""
 
 def tool_router(state: State) -> str:
     """Decide whether to continue or end"""
@@ -160,4 +160,5 @@ def yelp_agent_wrapper(question, thread_id: str):
     return {
         "answer": result["answer"],
         "used_context": used_context,
+        "trace_id": result.get("trace_id", "")
     }
