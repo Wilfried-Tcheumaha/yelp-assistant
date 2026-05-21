@@ -55,4 +55,4 @@ EXPOSE 8000
 WORKDIR /app/reviews_mcp_server/src
 
 # Command to run the application
-CMD ["python", "m", "reviews_mcp_server.main"]
+CMD ["python", "-m", "reviews_mcp_server.main"]

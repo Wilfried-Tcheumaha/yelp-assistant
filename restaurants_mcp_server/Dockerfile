@@ -16,7 +16,7 @@ COPY pyproject.toml uv.lock ./
 # Copy package files and source
 COPY restaurants_mcp_server ./restaurants_mcp_server
 
-# Superlinked reads YAML_FILENAME ("config.yaml") from process cwd (/app/api/src)
+# Superlinked reads YAML_FILENAME ("config.yaml") from process cwd
 COPY config.yaml restaurants_mcp_server/src/config.yaml
 
 ENV UV_COMPILE_BYTECODE=1
@@ -55,4 +55,4 @@ EXPOSE 8000
 WORKDIR /app/restaurants_mcp_server/src
 
 # Command to run the application
-CMD ["python", "m", "restaurants_mcp_server.main"]
+CMD ["python", "-m", "restaurants_mcp_server.main"]

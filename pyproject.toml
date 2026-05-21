@@ -14,10 +14,13 @@ dependencies = [
     "pymupdf>=1.27.1",
     "python-dotenv>=1.2.1",
     "streamlit>=1.54.0",
+    "torch",
+    "torchvision",
 ]
 
 [dependency-groups]
 dev = [
+    "fastmcp>=3.3.1",
     "langgraph>=1.1.6",
     "langgraph-checkpoint-postgres>=3.0.5",
     "langsmith>=0.7.23",
@@ -29,6 +32,8 @@ dev = [
     "sentence-transformers>=3.0.0",
     "superlinked>=37.5.0",
     "superlinked-server>=1.56.4",
+    "torch",
+    "torchvision",
 ]
 
 [tool.uv.workspace]
@@ -39,3 +44,16 @@ members = [
     "restaurants_mcp_server",
     "reviews_mcp_server",
 ]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

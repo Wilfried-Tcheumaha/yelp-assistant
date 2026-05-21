@@ -4,16 +4,16 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "Wilfried-tcheumaha", email = "tcheumaha2005@yahoo.fr" }
+    { name = "Wilfried-tcheumaha", email = "wilfried.tcheumaha@icloud.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=3.3.1",
-    "openai>=2.20.0",
+    "instructor>=1.14.5",
+    "pandas>=2.2.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "qdrant-client>=1.17.1",
-    "sentence-transformers>=5.3.0",
     "superlinked>=37.5.0",
     "superlinked-server>=1.56.4",
 ]

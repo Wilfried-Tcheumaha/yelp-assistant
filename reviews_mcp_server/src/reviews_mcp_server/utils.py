@@ -1,11 +1,9 @@
-import api.patches.instructor_compat  # noqa: F401 — Superlinked NLQ vs instructor 1.14+ API
-
-from superlinked import framework as sl
 import os
-from api.agents.qdrant_url import resolve_qdrant_url
 import openai
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, MatchAny, FusionQuery, Prefetch
+from qdrant_client.models import FieldCondition, Filter, MatchAny, FusionQuery, Prefetch
+
+from reviews_mcp_server.qdrant_url import resolve_qdrant_url
 
 
     #### Reviews Tool
