@@ -36,4 +36,6 @@ members = [
     "src/api",
     "api",
     "chatbot_ui",
+    "restaurants_mcp_server",
+    "reviews_mcp_server",
 ]
