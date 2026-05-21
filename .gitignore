@@ -214,4 +214,3 @@ notebooks/03-RAG-pipeline.ipynb
 
 # Docker-mounted Postgres data (LangGraph checkpointer)
 postgres_data/
-postgres_data/
