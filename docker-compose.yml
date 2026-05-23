@@ -10,6 +10,7 @@ services:
     restart: unless-stopped
 
   api:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: api/Dockerfile
@@ -49,6 +50,7 @@ services:
       - ./postgres_data:/var/lib/postgresql/data:z
 
   restaurants_mcp_server:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: restaurants_mcp_server/Dockerfile
