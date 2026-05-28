@@ -5768,6 +5768,7 @@ name = "yelp-assistant"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "api" },
     { name = "google-genai" },
     { name = "groq" },
     { name = "ipykernel" },
@@ -5805,6 +5806,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "api", editable = "api" },
     { name = "google-genai", specifier = ">=1.63.0" },
     { name = "groq", specifier = ">=1.0.0" },
     { name = "ipykernel", specifier = ">=7.2.0" },

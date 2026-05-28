@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "api",
     "google-genai>=1.63.0",
     "groq>=1.0.0",
     "ipykernel>=7.2.0",
@@ -38,7 +39,6 @@ dev = [
 
 [tool.uv.workspace]
 members = [
-    "src/api",
     "api",
     "chatbot_ui",
     "restaurants_mcp_server",
@@ -46,6 +46,7 @@ members = [
 ]
 
 [tool.uv.sources]
+api = { workspace = true }
 torch = [
   { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
 ]

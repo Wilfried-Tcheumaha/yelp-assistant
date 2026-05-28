@@ -1,9 +1,8 @@
-from telnetlib import STATUS
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Request
 import logging
-
-from api.agents.graph import yelp_agent_wrapper
-from api.api.models import RAGRequest, RAGResponse, RAGUsedContext, FeedbackRequest, FeedbackResponse
+from fastapi.responses import StreamingResponse
+from api.agents.graph import rag_agent_stream_wrapper
+from api.api.models import RAGRequest, FeedbackRequest, FeedbackResponse
 from api.api.processors.submit_feedback import submit_feedback
 
 logging.basicConfig(
@@ -20,14 +19,8 @@ feedback_router = APIRouter()
 def rag(
     request: Request,
     payload: RAGRequest
-)->RAGResponse:
-    result = yelp_agent_wrapper(payload.query,payload.thread_id)
-    return RAGResponse(
-        request_id=request.state.request_id,
-        answer=result["answer"],
-        used_context=[RAGUsedContext(**item) for item in result["used_context"]],
-        trace_id=result["trace_id"]
-    )
+)->StreamingResponse:
+    return StreamingResponse(rag_agent_stream_wrapper(payload.query,payload.thread_id), media_type="text/event-stream")
 
 @feedback_router.post("/")
 def send_feedback(

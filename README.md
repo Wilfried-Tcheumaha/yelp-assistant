@@ -6,7 +6,7 @@ This project implements a product-inspired Yelp assistant that answers user ques
 - two retrieval tools — a **hybrid structured search** over Yelp business records (semantic + numeric + hard filters) and a **review-text search** scoped to a set of business ids — back the agent,
 - and the agent generates the final response with **OpenAI**, citing the businesses it actually used.
 
-The whole graph is orchestrated with **LangGraph** and persisted across turns with a **Postgres** checkpointer, enabling **multi-turn conversations**. A **LangSmith** feedback endpoint records thumbs/comment feedback against the trace id of each answer.
+The whole graph is orchestrated with **LangGraph** and persisted across turns with a **Postgres** checkpointer, enabling **multi-turn conversations**. The API **streams the graph state** to the client as it executes (Server-Sent Events): each node start emits a progress frame (`Analysing the question...`, `Planning...`, tool calls, etc.), followed by a single final JSON frame with the answer and the cited businesses — so the UI can render live "thinking" updates instead of waiting on a single blocking response. A **LangSmith** feedback endpoint records thumbs/comment feedback against the trace id of each answer.
 
 At runtime, the assistant is exposed as a small **FastAPI** service. The project also ships a **Streamlit chat UI** for interactive usage, and the two retrieval tools are additionally packaged as **MCP servers** (HTTP) for reuse by external agents.
 
@@ -65,8 +65,16 @@ The retrieval tool `get_formatted_reviews_context(query: str, business_ids: list
   - `references: list[RAGUsedContext]` — typed list of business ids + short descriptions actually used,
   - `final_answer: bool` — whether the agent is done,
   - `tool_calls: list[ToolCall]` — any tools the agent wants to invoke next.
-- After the graph returns, `yelp_agent_wrapper` re-hydrates each cited reference by querying Qdrant directly via `QdrantClient.scroll` on `__object_id__`, returning a `used_context` list with `name`, `address`, `latitude`, `longitude`, `stars`, `reviews`, `categories`, `attributes`, and `hours`. This is what powers the UI cards + map.
-- The wrapper also returns the `trace_id` so the UI can attach feedback to the exact LangSmith run.
+- After the graph returns, the API re-hydrates each cited reference by querying Qdrant directly via `QdrantClient.scroll` on `__object_id__`, returning a `used_context` list with `name`, `address`, `latitude`, `longitude`, `stars`, `reviews`, `categories`, `attributes`, and `hours`. This is what powers the UI cards + map.
+- The API also returns the `trace_id` so the UI can attach feedback to the exact LangSmith run.
+
+### Streaming responses (Server-Sent Events)
+`POST /rag/` is implemented as a streaming endpoint (`text/event-stream`). The body is produced by `rag_agent_stream_wrapper` in `agents/graph.py`, which iterates `graph.stream(..., stream_mode=["debug", "values"])` and emits SSE frames as the workflow progresses:
+
+- **Status frames** are sent as plain-text `data:` lines as each node starts — e.g. `Analysing the question...`, `Planning...`, `Looking for items: best restaurants in Tampa.`, `Fetching user reviews...`. They give the UI live progress without exposing internal state.
+- **Final frame** is a single JSON `data:` line of shape `{"type": "final_answer", "data": {"answer": "...", "used_context": [...], "trace_id": "..."}}` once the graph reaches `END`.
+
+The Streamlit UI parses each `data:` line: if it's JSON with `type == "final_answer"` it renders the answer + cards + map; otherwise it treats the line as a status string and shows it as an italic progress hint that's cleared when the final frame arrives.
 
 ### MCP servers (optional reuse path)
 Both retrieval tools are *also* packaged as standalone **MCP servers** under `restaurants_mcp_server/` and `reviews_mcp_server/`:
@@ -101,7 +109,7 @@ Both retrieval tools are *also* packaged as standalone **MCP servers** under `re
 ## API
 
 ### Endpoints
-- `POST /rag/` — run the agentic RAG workflow for one user turn.
+- `POST /rag/` — run the agentic RAG workflow for one user turn. **Streaming endpoint** (`text/event-stream`).
 - `POST /feedback/` — record thumbs (`feedback_score`: 0 or 1) and/or free-text feedback against a previous answer's `trace_id`.
 
 ### `POST /rag/`
@@ -116,28 +124,60 @@ Request:
 
 `thread_id` identifies the conversation. Reusing it across requests gives you a multi-turn conversation (state restored from the Postgres checkpointer); a fresh `thread_id` starts a new conversation.
 
-Response:
-```json
-{
-  "request_id": "uuid-string",
-  "trace_id": "langsmith-run-uuid",
-  "answer": "assistant response text",
-  "used_context": [
-    {
-      "id": "business_id",
-      "description": "short description of the restaurant",
-      "name": "Joe's Pizza",
-      "address": "123 Main St, Paris",
-      "latitude": 48.8566,
-      "longitude": 2.3522,
-      "stars": 4.5,
-      "reviews": 312,
-      "categories": ["Pizza", "Italian"],
-      "attributes": { "OutdoorSeating": true },
-      "hours": { "Monday": "11:0-22:0" }
-    }
-  ]
-}
+Response: **Server-Sent Events** (`Content-Type: text/event-stream`). The client should read line-by-line and treat each `data:` line as one frame.
+
+Two kinds of frames are emitted, in order:
+
+1. **Status frames** — zero or more plain-text progress lines, one per graph step:
+
+   ```
+   data: Analysing the question...
+
+   data: Planning...
+
+   data: Looking for items: italian restaurants in paris.
+
+   data: Fetching user reviews...
+   ```
+
+2. **Final frame** — exactly one JSON line at the end:
+
+   ```
+   data: {"type": "final_answer", "data": {"answer": "...", "trace_id": "...", "used_context": [...]}}
+   ```
+
+   The `data` payload contains:
+
+   ```json
+   {
+     "answer": "assistant response text",
+     "trace_id": "langsmith-run-uuid",
+     "used_context": [
+       {
+         "id": "business_id",
+         "description": "short description of the restaurant",
+         "name": "Joe's Pizza",
+         "address": "123 Main St, Paris",
+         "latitude": 48.8566,
+         "longitude": 2.3522,
+         "stars": 4.5,
+         "reviews": 312,
+         "categories": ["Pizza", "Italian"],
+         "attributes": { "OutdoorSeating": true },
+         "hours": { "Monday": "11:0-22:0" }
+       }
+     ]
+   }
+   ```
+
+A simple consumer is `try: output = json.loads(data); if output["type"] == "final_answer": ...` for each `data:` line, falling back to "treat it as a status message" when the line is not JSON. The Streamlit UI in this repo does exactly that.
+
+Quick test from the host:
+```bash
+curl -N -X POST http://localhost:8000/rag/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"query": "3 popular restaurants in tampa", "thread_id": "demo-1"}'
 ```
 
 ### `POST /feedback/`
@@ -213,7 +253,7 @@ This repo includes `docker-compose.yml` with:
 ```
 api/src/api/
   agents/
-    graph.py                # LangGraph workflow + State + agent_execution + yelp_agent_wrapper
+    graph.py                # LangGraph workflow + State + agent_execution + rag_agent_stream_wrapper (SSE)
     agents.py               # intent_router_node, agent_node, structured response models
     tools.py                # get_formatted_context + get_formatted_reviews_context + tracing
     prompts/
@@ -258,6 +298,7 @@ notebooks/
   13-Multiple-Tools.ipynb
   14-Human-Feedback.ipynb
   15-mcp.ipynb
+  16-Streaming-State.ipynb
 
 docker-compose.yml          # qdrant + postgres + api + streamlit-app + restaurants_mcp + reviews_mcp
 ```

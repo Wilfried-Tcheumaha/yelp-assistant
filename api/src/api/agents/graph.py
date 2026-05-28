@@ -90,38 +90,16 @@ workflow.add_edge("tool_node", "agent_node")
 # graph = workflow.compile()
 
 ### Agent Execution
-def agent_execution(question: str, thread_id: str) -> dict:
-    initial_state = {
-        "messages": [{"role": "user", "content": question}],
-        "available_tools": tool_descriptions,
-        "iteration": 0
-    }
 
-    config = {
-        "configurable": {
-            "thread_id": thread_id
-        }
-    }
-
-    with PostgresSaver.from_conn_string(
-    "postgresql://langgraph_user:postgres_password@postgres:5432/langgraph_db") as checkpointer:
-        graph=workflow.compile(checkpointer=checkpointer)
-        result = graph.invoke(initial_state, config)
-    return result
-    
-
-def yelp_agent_wrapper(question, thread_id: str):
-    """Wrapper for the Yelp agent execution"""
-    result = agent_execution(question, thread_id)
-
-    # Superlinked stores the Yelp id under `__object_id__` (the actual Qdrant point id
+def rag_agent_stream_wrapper(question, thread_id: str):
+     # Superlinked stores the Yelp id under `__object_id__` (the actual Qdrant point id
     # is a derived UUID), so we filter on the payload field rather than retrieve(ids=...).
     raw_client = QdrantClient(
         url=resolve_qdrant_url(),
         api_key=os.getenv("QDRANT_API_KEY", ""),
     )
     collection = os.getenv("QDRANT_COLLECTION", "yelp-businesses-collection-00")
-
+    
     def _maybe_json(v):
         if isinstance(v, str) and v.strip():
             try:
@@ -130,6 +108,55 @@ def yelp_agent_wrapper(question, thread_id: str):
                 return v
         return v
 
+    def _string_for_sse(message:str):
+        return f"data: {message}\n\n"
+
+    def process_graph_event(chunk):
+
+        def _is_node_start(chunk):
+            return chunk[1].get("type") == "task"
+
+        def _is_node_end(chunk):
+            return chunk[0] == "updates"
+
+        def _tool_to_text(tool_call):
+            if tool_call.name == "get_formatted_context":
+                return f"Looking for items: {tool_call.arguments.get('query', '')}."
+            elif tool_call.name == "get_formatted_reviews_context":
+                return f"Fetching user reviews..."
+            else:
+                return f"Unknown tool call: {tool_call.name}"
+
+        if _is_node_start(chunk):
+            if chunk[1].get("payload", {}).get("name") == "intent_router_node":
+                return ("Analysing the question...")
+            if chunk[1].get("payload", {}).get("name") == "agent_node":
+                return ("Planning...")
+            if chunk[1].get("payload", {}).get("name") == "tool_node":
+                message = " ".join([_tool_to_text(tool_call) for tool_call in chunk[1].get('payload', {}).get('input', {}).tool_calls])
+                return (message)
+        else:   
+            return False
+
+    initial_state = {
+        "messages": [{"role": "user", "content": question}],
+        "available_tools": tool_descriptions,
+        "iteration": 0
+    }
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+
+    with PostgresSaver.from_conn_string(
+"postgresql://langgraph_user:postgres_password@postgres:5432/langgraph_db") as checkpointer:
+        graph=workflow.compile(checkpointer=checkpointer)
+        for chunk in graph.stream(initial_state, config, stream_mode=["debug","values"]):
+            processed_chunk = process_graph_event(chunk)
+            if processed_chunk:
+                yield _string_for_sse(processed_chunk)
+            
+            if chunk[0] == "values":
+                result = chunk[1]
     used_context = []
     for item in result.get("references", []):
         points, _ = raw_client.scroll(
@@ -157,8 +184,11 @@ def yelp_agent_wrapper(question, thread_id: str):
             "hours": _maybe_json(payload.get("__schema_field__Business_hours")),
         })
 
-    return {
-        "answer": result["answer"],
-        "used_context": used_context,
-        "trace_id": result.get("trace_id", "")
-    }
+    yield _string_for_sse(json.dumps({
+        "type": "final_answer",
+        "data": {
+            "answer": result["answer"],
+            "used_context": used_context,
+            "trace_id": result.get("trace_id", "")
+        }
+    }))

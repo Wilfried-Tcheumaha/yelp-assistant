@@ -4,6 +4,7 @@ from chatbot_ui.core.config import config
 from chatbot_ui.utils import YELP_STARS_CSS, render_business_card, render_restaurants_map
 import uuid
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +33,7 @@ def api_call(method, url, **kwargs):
 
     try:
         response = getattr(requests, method)(url, **kwargs)
-
-        try:
-            response_data = response.json()
-        except requests.exceptions.JSONDecodeError:
-            response_data = {"message": "Invalid JSON response from API"}
-
-        if response.ok:
-            return True, response_data
-
-        return False, response_data
+        return response.iter_lines(decode_unicode=True)
 
     except requests.exceptions.ConnectionError:
         _show_error_popup("Could not connect to the API. Please check your connection and try again.")
@@ -52,6 +44,28 @@ def api_call(method, url, **kwargs):
     except Exception as e:
         _show_error_popup(f"An unexpected error occurred: {str(e)}")
         return False, {"message": str(e)}
+
+def api_call_stream(method, url, **kwargs):
+    def _show_error_popup(message):
+        """Show error message as a popup in the top right corner of the screen"""
+        st.session_state["error_popup"] = {
+            "visible": True,
+            "message": message,
+        }
+
+    try:
+        response = requests.request(method, url, **kwargs)
+    except requests.exceptions.ConnectionError:
+        _show_error_popup("Could not connect to the API. Please check your connection and try again.")
+        return False, {"message": "Connection error."}
+    except requests.exceptions.Timeout:
+        _show_error_popup("The request timed out. Please try again.")
+        return False, {"message": "Request timed out."}
+    except Exception as e:
+        _show_error_popup(f"An unexpected error occurred: {str(e)}")
+        return False, {"message": str(e)}
+
+    return response.iter_lines(decode_unicode=True)
 
 def submit_feedback(feedback_type=None, feedback_text=""):
     """Submit feedback to the API endpoint"""
@@ -197,22 +211,61 @@ if prompt := st.chat_input("Enter your message..."):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            url = f"{config.API_URL.rstrip('/')}/rag/"
-            ok, data = api_call("post", url, json={"query": prompt, "thread_id": session_id})
+            status_placeholder = st.empty()
+            message_placeholder = st.empty()
 
-            st.session_state.used_context = data.get("used_context", [])
-            # Success: API returns {"answer", "used_context", "trace_id"}. Errors: {"detail": ...}.
-            if ok:
-                answer = data.get("answer", "")
-                st.session_state.trace_id = data.get("trace_id")
-                # Reset feedback UI state for the new assistant turn.
-                st.session_state.latest_feedback = None
-                st.session_state.feedback_submission_status = None
-                st.session_state.show_feedback_box = False
-            else:
-                err = data.get("detail", data.get("message", "Request failed"))
-                answer = err if isinstance(err, str) else str(err)
-            st.write(answer)
+            url = f"{config.API_URL.rstrip('/')}/rag/"
+            answer: str | None = None
+
+            for line in api_call_stream(
+                "post",
+                url,
+                json={"query": prompt, "thread_id": session_id},
+                stream=True,
+                headers={"Accept": "text/event-stream"},
+            ):
+                line_text = line.decode("utf-8") if isinstance(line, bytes) else line
+                if not line_text.startswith("data:"):
+                    continue
+
+                data = line_text[len("data:"):].lstrip()
+                if not data:
+                    # SSE keep-alive / blank separator — ignore.
+                    continue
+
+                # The API emits two kinds of `data:` frames:
+                #   1. Plain-string status updates  e.g. "Planning..."
+                #   2. A final JSON object         e.g. {"type": "final_answer", ...}
+                try:
+                    output = json.loads(data)
+                except json.JSONDecodeError:
+                    output = None
+
+                if isinstance(output, dict) and output.get("type") == "final_answer":
+                    payload = output.get("data", {})
+                    answer = payload.get("answer", "")
+                    st.session_state.trace_id = payload.get("trace_id", "")
+                    st.session_state.used_context = payload.get("used_context", [])
+                    st.session_state.latest_feedback = None
+                    st.session_state.feedback_submission_status = None
+                    st.session_state.show_feedback_box = False
+
+                    status_placeholder.empty()
+                    message_placeholder.markdown(answer)
+                else:
+                    # Anything else is a status string ("Analysing the question...",
+                    # "Planning...", "Looking for items: ...", etc.).
+                    msg = data if output is None else (
+                        (output.get("data") or {}).get("message")
+                        or output.get("type")
+                        or str(output)
+                    )
+                    status_placeholder.markdown(f"*{msg}*")
+
+            if answer is None:
+                answer = "Sorry, the assistant didn't return a response. Please try again."
+                status_placeholder.empty()
+                message_placeholder.error(answer)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
     st.rerun()
