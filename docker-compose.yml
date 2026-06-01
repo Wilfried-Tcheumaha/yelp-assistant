@@ -18,11 +18,17 @@ services:
       - 8000:8000
     environment:
       QDRANT_URL: http://qdrant:6333
+      PHOTOS_DIR: /app/photos
+      # Persist the HuggingFace cache (CLIP + sentence-transformer weights) across
+      # container recreates so models aren't re-downloaded every restart.
+      HF_HOME: /app/.hf_cache
     env_file:
       - .env
     restart: unless-stopped
     volumes:
       - ./api/src:/app/api/src
+      - ./data/raw/photos:/app/photos:ro
+      - ./.hf_cache:/app/.hf_cache
 
   streamlit-app:
     build:
@@ -30,6 +36,11 @@ services:
       dockerfile: chatbot_ui/Dockerfile
     ports:
       - 8501:8501
+    environment:
+      # In-cluster URL the Streamlit process uses to call the FastAPI service.
+      API_URL: http://api:8000
+      # Browser-facing URL the user's browser uses to fetch <img src="..."> photos.
+      PUBLIC_API_URL: http://localhost:8000
     env_file:
       - .env
     restart: unless-stopped
@@ -70,5 +81,4 @@ services:
     env_file:
       - .env
     restart: unless-stopped
-  
 

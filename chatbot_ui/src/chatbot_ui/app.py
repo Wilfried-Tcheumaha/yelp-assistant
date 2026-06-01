@@ -23,38 +23,22 @@ def get_session_id():
 
 session_id = get_session_id()
 
-def api_call(method, url, **kwargs):
-    def _show_error_popup(message):
-        """Show error message as a popup in the top right corner of the screen"""
-        st.session_state["error_popup"] = {
-            "visible": True,
-            "message": message,
-        }
+def _show_error_popup(message: str):
+    """Surface an error to the user via session state."""
+    st.session_state["error_popup"] = {"visible": True, "message": message}
 
-    try:
-        response = getattr(requests, method)(url, **kwargs)
-        return response.iter_lines(decode_unicode=True)
 
-    except requests.exceptions.ConnectionError:
-        _show_error_popup("Could not connect to the API. Please check your connection and try again.")
-        return False, {"message": "Connection error."}
-    except requests.exceptions.Timeout:
-        _show_error_popup("The request timed out. Please try again.")
-        return False, {"message": "Request timed out."}
-    except Exception as e:
-        _show_error_popup(f"An unexpected error occurred: {str(e)}")
-        return False, {"message": str(e)}
+def api_call(method: str, url: str, **kwargs):
+    """Non-streaming JSON request. Returns (ok: bool, payload: dict).
 
-def api_call_stream(method, url, **kwargs):
-    def _show_error_popup(message):
-        """Show error message as a popup in the top right corner of the screen"""
-        st.session_state["error_popup"] = {
-            "visible": True,
-            "message": message,
-        }
-
+    On any error (network, HTTP 4xx/5xx, JSON decode), surfaces a popup
+    and returns (False, {"message": "..."}); the caller just checks `ok`.
+    """
     try:
         response = requests.request(method, url, **kwargs)
+        response.raise_for_status()
+        body = response.json() if response.content else {}
+        return True, body
     except requests.exceptions.ConnectionError:
         _show_error_popup("Could not connect to the API. Please check your connection and try again.")
         return False, {"message": "Connection error."}
@@ -65,7 +49,28 @@ def api_call_stream(method, url, **kwargs):
         _show_error_popup(f"An unexpected error occurred: {str(e)}")
         return False, {"message": str(e)}
 
-    return response.iter_lines(decode_unicode=True)
+
+def api_call_stream(method: str, url: str, **kwargs):
+    """Streaming request. Generator yielding decoded SSE lines (str).
+
+    On any error, surfaces a popup and yields nothing — the caller's loop
+    simply finishes without ever seeing a `final_answer` frame, which the
+    `if answer is None` fallback below already handles.
+    """
+    try:
+        response = requests.request(method, url, **kwargs)
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        _show_error_popup("Could not connect to the API. Please check your connection and try again.")
+        return
+    except requests.exceptions.Timeout:
+        _show_error_popup("The request timed out. Please try again.")
+        return
+    except Exception as e:
+        _show_error_popup(f"An unexpected error occurred: {str(e)}")
+        return
+
+    yield from response.iter_lines(decode_unicode=True)
 
 def submit_feedback(feedback_type=None, feedback_text=""):
     """Submit feedback to the API endpoint"""
@@ -119,7 +124,10 @@ with st.sidebar:
     with suggestions_tab:
         if st.session_state.used_context:
             for idx, item in enumerate(st.session_state.used_context):
-                st.markdown(render_business_card(item), unsafe_allow_html=True)
+                st.markdown(
+                    render_business_card(item, photo_base_url=config.PUBLIC_API_URL),
+                    unsafe_allow_html=True,
+                )
                 st.divider()
         else:
             st.info("No suggestions yet")

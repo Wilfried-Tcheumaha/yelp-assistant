@@ -214,3 +214,6 @@ notebooks/03-RAG-pipeline.ipynb
 
 # Docker-mounted Postgres data (LangGraph checkpointer)
 postgres_data/
+
+# Docker-mounted HuggingFace cache (CLIP + sentence-transformer weights)
+.hf_cache/

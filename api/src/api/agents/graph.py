@@ -17,7 +17,14 @@ from typing import Annotated, List, Dict
 from pydantic import BaseModel, Field
 from api.agents.agents import ToolCall, RAGUsedContext
 from langgraph.graph import StateGraph, START, END
-from api.agents.tools import get_formatted_context,get_formatted_reviews_context
+from api.agents.tools import (
+    get_formatted_context,
+    get_formatted_reviews_context,
+    get_photos_for_businesses,
+    get_top_review_for_businesses,
+)
+import concurrent.futures
+import contextvars
 from api.agents.utils.utils import get_tool_descriptions
 from api.agents.agents import agent_node, intent_router_node
 from operator import add
@@ -182,7 +189,51 @@ def rag_agent_stream_wrapper(question, thread_id: str):
             "categories": payload.get("__schema_field__Business_category_tags"),
             "attributes": _maybe_json(payload.get("__schema_field__Business_attributes")),
             "hours": _maybe_json(payload.get("__schema_field__Business_hours")),
+            "photos": [],
+            "top_review": "",
         })
+
+    # Soft enrichment: best photos + most-relevant review per cited business.
+    # Run in parallel so the user-visible delay is max(photos, reviews), not their sum.
+    if used_context:
+        yield _string_for_sse("Pulling photos and reviews...")
+        biz_ids = [entry["id"] for entry in used_context]
+        photos_by_business: dict = {}
+        review_by_business: dict = {}
+        # Snapshot the caller's contextvars so each worker thread inherits
+        # LangSmith's current-run pointer — otherwise the @traceable retriever
+        # spans below run in fresh threads with empty context and either
+        # orphan or get dropped from the trace tree.
+        ctx_photos = contextvars.copy_context()
+        ctx_reviews = contextvars.copy_context()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f_photos = ex.submit(
+                ctx_photos.run,
+                lambda: get_photos_for_businesses(
+                    query=question,
+                    business_ids=biz_ids,
+                    photos_per_business=3,
+                ),
+            )
+            f_reviews = ex.submit(
+                ctx_reviews.run,
+                lambda: get_top_review_for_businesses(
+                    query=question,
+                    business_ids=biz_ids,
+                ),
+            )
+            try:
+                photos_by_business = f_photos.result() or {}
+            except Exception:
+                photos_by_business = {}
+            try:
+                review_by_business = f_reviews.result() or {}
+            except Exception:
+                review_by_business = {}
+
+        for entry in used_context:
+            entry["photos"] = photos_by_business.get(entry["id"], [])
+            entry["top_review"] = review_by_business.get(entry["id"], "")
 
     yield _string_for_sse(json.dumps({
         "type": "final_answer",

@@ -54,6 +54,38 @@ YELP_STARS_CSS = """
     font-size: 0.82rem; color: #111; background: #fff;
     white-space: nowrap;
 }
+
+/* -- Photo strip -- */
+.yelp-card__photos {
+    display: flex; gap: 6px; margin: 8px 0 10px 0;
+    overflow-x: auto;
+}
+.yelp-card__photo {
+    flex: 0 0 auto;
+    width: 96px; height: 96px;
+    border-radius: 6px; overflow: hidden;
+    background: #f2f2f2;
+    border: 1px solid #e0e0e0;
+}
+.yelp-card__photo img {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+}
+
+/* -- Top review snippet -- */
+.yelp-card__review {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin: 6px 0 8px 0;
+    color: #333; font-size: 0.92rem; line-height: 1.45;
+}
+.yelp-card__review-icon {
+    color: #555; flex: 0 0 auto; line-height: 1.45;
+}
+.yelp-card__review-text { color: #333; }
+.yelp-card__review-more {
+    color: #0073bb; text-decoration: none; margin-left: 4px; font-weight: 700;
+}
+.yelp-card__review-more:hover { text-decoration: underline; }
 </style>
 """
 
@@ -184,8 +216,76 @@ def compute_open_status(
     return {"open": False, "label": "Closed", "detail": ""}
 
 
-def render_business_card(item: dict[str, Any]) -> str:
-    """Yelp-style card: name, stars + score + reviews, address, status, pills."""
+def _render_photos(photos: list[dict] | None, photo_base_url: str | None) -> str:
+    """Render a horizontal strip of photo thumbnails. Returns "" if nothing to show."""
+    if not photos:
+        return ""
+    base = (photo_base_url or "").rstrip("/")
+    items: list[str] = []
+    for photo in photos:
+        url = photo.get("url") or ""
+        if not url:
+            continue
+        if url.startswith(("http://", "https://")):
+            full_url = url
+        elif base:
+            full_url = f"{base}{url if url.startswith('/') else '/' + url}"
+        else:
+            full_url = url
+        alt = _escape(photo.get("caption") or photo.get("label") or "photo")
+        items.append(
+            f'<div class="yelp-card__photo">'
+            f'<img src="{full_url}" alt="{alt}" loading="lazy" />'
+            f'</div>'
+        )
+    if not items:
+        return ""
+    return f'<div class="yelp-card__photos">{"".join(items)}</div>'
+
+
+def _render_top_review(
+    review: str | None,
+    raw_name: str,
+    raw_address: str,
+    max_chars: int = 150,
+) -> str:
+    """Yelp-style speech-bubble + truncated quote with a 'more' link to Yelp search."""
+    if not review:
+        return ""
+    text = " ".join(review.split())  # collapse whitespace/newlines from review payload
+    if len(text) > max_chars:
+        snippet = _escape(text[:max_chars].rstrip(" ,.;:!?-"))
+        more_link = ""
+        if raw_name:
+            find_desc = quote_plus(raw_name.strip())
+            find_loc = quote_plus(raw_address.strip()) if raw_address else ""
+            yelp_url = (
+                f"https://www.yelp.com/search?find_desc={find_desc}"
+                + (f"&find_loc={find_loc}" if find_loc else "")
+            )
+            more_link = (
+                f' <a class="yelp-card__review-more" href="{yelp_url}" '
+                f'target="_blank" rel="noopener noreferrer">more</a>'
+            )
+        body = f'"{snippet}…"{more_link}'
+    else:
+        body = f'"{_escape(text)}"'
+
+    return (
+        '<div class="yelp-card__review">'
+        '<span class="yelp-card__review-icon">💬</span>'
+        f'<span class="yelp-card__review-text">{body}</span>'
+        '</div>'
+    )
+
+
+def render_business_card(item: dict[str, Any], photo_base_url: str | None = None) -> str:
+    """Yelp-style card: name, stars + score + reviews, address, status, pills, photos.
+
+    `photo_base_url` is prepended to relative `photo["url"]` values (e.g.
+    `"/photos/<id>.jpg"`) so the user's browser can fetch them. Pass the
+    public API URL here, not the in-Docker hostname.
+    """
     raw_name = item.get("name") or ""
     raw_address = item.get("address") or ""
     name = _escape(raw_name or "—")
@@ -194,6 +294,12 @@ def render_business_card(item: dict[str, Any]) -> str:
     address = _escape(raw_address)
     categories = item.get("categories") or []
     status = compute_open_status(item.get("hours"))
+    photos_html = _render_photos(item.get("photos"), photo_base_url)
+    review_html = _render_top_review(
+        item.get("top_review"),
+        raw_name=raw_name,
+        raw_address=raw_address,
+    )
 
     score_html = (
         f'<span class="yelp-card__score">{stars:.1f}</span>'
@@ -241,7 +347,9 @@ def render_business_card(item: dict[str, Any]) -> str:
         '<div class="yelp-card">'
         f'<div class="yelp-card__name">{name}</div>'
         f'<div class="yelp-card__rating-line">{render_stars(stars)}{score_html}{reviews_html}</div>'
+        f'{photos_html}'
         f'{meta_html}'
+        f'{review_html}'
         f'{tags_html}'
         '</div>'
     )

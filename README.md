@@ -6,7 +6,7 @@ This project implements a product-inspired Yelp assistant that answers user ques
 - two retrieval tools — a **hybrid structured search** over Yelp business records (semantic + numeric + hard filters) and a **review-text search** scoped to a set of business ids — back the agent,
 - and the agent generates the final response with **OpenAI**, citing the businesses it actually used.
 
-The whole graph is orchestrated with **LangGraph** and persisted across turns with a **Postgres** checkpointer, enabling **multi-turn conversations**. The API **streams the graph state** to the client as it executes (Server-Sent Events): each node start emits a progress frame (`Analysing the question...`, `Planning...`, tool calls, etc.), followed by a single final JSON frame with the answer and the cited businesses — so the UI can render live "thinking" updates instead of waiting on a single blocking response. A **LangSmith** feedback endpoint records thumbs/comment feedback against the trace id of each answer.
+The whole graph is orchestrated with **LangGraph** and persisted across turns with a **Postgres** checkpointer, enabling **multi-turn conversations**. After the graph completes, the API runs a **post-graph enrichment** pass — in parallel — that attaches the top photos (hybrid CLIP + caption-text retrieval, RRF-fused) and the single most-relevant **top review per business** to each cited result, so the UI gets full Yelp-style cards (rating, photo strip, location, review snippet, tags) without an extra round trip. The API **streams the graph state** to the client as it executes (Server-Sent Events): each node start emits a progress frame (`Analysing the question...`, `Planning...`, tool calls, `Pulling top photos and reviews...`), followed by a single final JSON frame with the answer and the cited businesses — so the UI can render live "thinking" updates instead of waiting on a single blocking response. A **LangSmith** feedback endpoint records thumbs/comment feedback against the trace id of each answer.
 
 At runtime, the assistant is exposed as a small **FastAPI** service. The project also ships a **Streamlit chat UI** for interactive usage, and the two retrieval tools are additionally packaged as **MCP servers** (HTTP) for reuse by external agents.
 
@@ -66,12 +66,47 @@ The retrieval tool `get_formatted_reviews_context(query: str, business_ids: list
   - `final_answer: bool` — whether the agent is done,
   - `tool_calls: list[ToolCall]` — any tools the agent wants to invoke next.
 - After the graph returns, the API re-hydrates each cited reference by querying Qdrant directly via `QdrantClient.scroll` on `__object_id__`, returning a `used_context` list with `name`, `address`, `latitude`, `longitude`, `stars`, `reviews`, `categories`, `attributes`, and `hours`. This is what powers the UI cards + map.
+- The same hydration pass also runs a **parallel enrichment** step (`ThreadPoolExecutor`, two workers) that attaches `photos: [...]` and `top_review: "..."` to each entry, so wall-clock latency for the post-graph step is `max(photos, reviews)` rather than their sum. See the *Hybrid photo retrieval* and *Top review per business* sections below.
 - The API also returns the `trace_id` so the UI can attach feedback to the exact LangSmith run.
+
+### Hybrid photo retrieval (caption text + image, RRF-fused)
+The assistant attaches **Yelp-style photos** to each suggested business and ranks them against the user's actual question with a **hybrid signal**, the same pattern production photo search systems use:
+
+- **Caption-text vector** — catches literal terms a user expects to match (specific menu items, named amenities like "heaters") even when the photo doesn't visually depict them.
+- **Image vector** — catches visual concepts the caption never mentions (a heat lamp visible in the frame, ambient lighting, decor) so retrieval still works on uncaptioned photos.
+
+Each photo is indexed in Qdrant with **two named vectors**:
+
+| Named vector   | Encoder                          | Dim   |
+|----------------|----------------------------------|-------|
+| `caption_text` | OpenAI `text-embedding-3-small`  | 1536  |
+| `image_clip`   | `clip-ViT-B-32` (sentence-transformers) | 512 |
+
+The offline notebook `notebooks/17- photos-embeddings.ipynb` builds both vectors per photo (caption text is `"{label}: {caption}"`, falling back to just `label` when the caption is empty) and upserts them into Qdrant collection `yelp-photos-collection-00` with payload `{business_id, photo_id, caption, label}` and a keyword payload index on `business_id`.
+
+At request time, after the graph builds `used_context`, `api.agents.tools.get_photos_for_businesses(query, business_ids)`:
+
+1. Encodes the user's question with **both** encoders **in parallel** (a `ThreadPoolExecutor` so wall-clock is `max(text, clip)`, not their sum), each wrapped in `@traceable` so the embeddings show up as separate spans in LangSmith.
+2. Runs a single Qdrant `query_points` with two `Prefetch` clauses (one against `caption_text`, one against `image_clip`) plus `FusionQuery(fusion="rrf")` and a `business_id ∈ [...]` filter. Reciprocal Rank Fusion merges the two top-k lists so a photo that scores well on either signal floats up.
+3. Buckets the fused hits by `business_id` and attaches the top-3 to each `used_context` entry as `photos: [{photo_id, url, caption, label, score}, ...]`.
+
+The photo files are served by FastAPI at `GET /photos/{photo_id}.jpg` via a `StaticFiles` mount, backed by a docker-compose bind-mount of `./data/raw/photos`. The Streamlit business card renders a horizontal strip of three thumbnails per result.
+
+To remove the CLIP cold-start cliff on the first request after a container restart, the API's `lifespan` hook **pre-warms** `clip-ViT-B-32` during startup, and the docker-compose `api` service bind-mounts `./.hf_cache` (gitignored) at `$HF_HOME` so the CLIP + sentence-transformer weights aren't re-downloaded across `docker compose down`/`up`. (The bind mount replaced an earlier named volume that picked up an unreadable `token` file from a prior container — the bind mount lives under the project, has predictable host-side permissions, and is trivial to wipe.) If the photos collection is missing or either encoder fails, the helper returns `{}` and the answer flows through with empty photo strips — the rest of the response is unaffected.
+
+### Top review per business (RRF-ranked)
+For each cited business, the assistant also picks the **single most-relevant review** to display on the card — the speech-bubble snippet you see under the address. `api.agents.tools.get_top_review_for_businesses(query, business_ids)`:
+
+1. Reuses the existing reviews retriever (`retrieve_reviews_data`) — same `text-embedding-3-small` query embedding, same `Prefetch` filtered by `business_id ∈ [...]`, same `FusionQuery(fusion="rrf")` — but with `k = max(len(business_ids) * 4, 8)` so RRF has enough candidates to cover every business in the result set.
+2. Walks the fused points and keeps the **first** review per `business_id`. Because `query_points` returns rows ranked globally by RRF score, the first hit per business is the most relevant review for that business *given the user's actual question*.
+3. Returns `{business_id: review_text}`. Soft-fails to `{}` so a review-side glitch never blocks the answer.
+
+The post-graph enrichment runs `get_photos_for_businesses` and `get_top_review_for_businesses` **concurrently** in a `ThreadPoolExecutor(max_workers=2)`. Each task is wrapped in `contextvars.copy_context().run(...)` so the worker threads inherit the caller's LangSmith run context — without that snapshot, `concurrent.futures` would start the workers with empty `contextvars` and the `@traceable` embedding spans inside each path would orphan from the trace tree (or get dropped at flush time). The same pattern is applied inside `get_photos_for_businesses` for the parallel `embed_photo_caption` / `embed_photo_clip` submissions.
 
 ### Streaming responses (Server-Sent Events)
 `POST /rag/` is implemented as a streaming endpoint (`text/event-stream`). The body is produced by `rag_agent_stream_wrapper` in `agents/graph.py`, which iterates `graph.stream(..., stream_mode=["debug", "values"])` and emits SSE frames as the workflow progresses:
 
-- **Status frames** are sent as plain-text `data:` lines as each node starts — e.g. `Analysing the question...`, `Planning...`, `Looking for items: best restaurants in Tampa.`, `Fetching user reviews...`. They give the UI live progress without exposing internal state.
+- **Status frames** are sent as plain-text `data:` lines as each node starts — e.g. `Analysing the question...`, `Planning...`, `Looking for items: best restaurants in Tampa.`, `Fetching user reviews...`, `Pulling top photos and reviews...`. They give the UI live progress without exposing internal state.
 - **Final frame** is a single JSON `data:` line of shape `{"type": "final_answer", "data": {"answer": "...", "used_context": [...], "trace_id": "..."}}` once the graph reaches `END`.
 
 The Streamlit UI parses each `data:` line: if it's JSON with `type == "final_answer"` it renders the answer + cards + map; otherwise it treats the line as a status string and shows it as an italic progress hint that's cleared when the final frame arrives.
@@ -88,16 +123,19 @@ Both retrieval tools are *also* packaged as standalone **MCP servers** under `re
 - Chat column on the left; **right-side column shows a pydeck map** with numbered red pins for every suggested restaurant that has valid coordinates.
 - Sidebar renders a **Yelp-style business card** per suggestion:
   - orange star chips for the rating, review count,
+  - horizontal **photo strip** (top-3 thumbnails from the hybrid CLIP + caption-text retriever),
   - live **Open / Closed** status computed from `hours` (handles overnight ranges and next-open time),
-  - category tags,
-  - clickable address that deep-links to `https://www.yelp.com/search?find_desc=<name>&find_loc=<address>`.
+  - clickable address that deep-links to `https://www.yelp.com/search?find_desc=<name>&find_loc=<address>`,
+  - **top review** speech bubble — RRF-ranked review snippet for that business + the user's question, truncated at ~150 chars with a `more` link to the Yelp search page,
+  - category tags.
 - **Thumbs feedback** under each assistant turn (`st.feedback("thumbs", ...)` driven by an `on_change` callback). Negative feedback opens an optional comment box. The UI POSTs to `/feedback/` with the `trace_id` captured from the last `/rag/` response.
 - UI rendering helpers live in `chatbot_ui/src/chatbot_ui/utils/` (`business_card.py`, `restaurants_map.py`).
 
 ### Observability & feedback (LangSmith)
-- The API uses [LangSmith](https://smith.langchain.com/) via the `langsmith` SDK (`@traceable` on the intent router, the retrieval steps, embedding, and the review search).
+- The API uses [LangSmith](https://smith.langchain.com/) via the `langsmith` SDK (`@traceable` on the intent router, the agent node, the retrieval steps, the embedding calls, the review search, the photo retriever, and the top-review retriever).
 - Each `POST /rag/` request can produce a trace tree like:
-  - `agent_execution` → `intent_router_node` → `agent_node` → `retriever_top_n` → `format_retrieved_context` → `agent_node` → `retrieve_reviews_data` → `embed_query` → `process_reviews_context` → `agent_node` (final)
+  - `intent_router_node` → `agent_node` → `retriever_top_n` → `format_retrieved_context` → `agent_node` → `retrieve_reviews_data` → `embed_query` → `process_reviews_context` → `agent_node` (final) → *post-graph, in parallel:* `retrieve_photos` (with `embed_photo_caption` + `embed_photo_clip` children) ‖ `retrieve_top_review` (with its own `embed_query`).
+- Worker threads inherit the parent run via `contextvars.copy_context()` so the embedding spans nest correctly under their retriever instead of orphaning when `ThreadPoolExecutor` spawns a fresh thread.
 - The router records the trace id on the graph state, the API surfaces it in the `RAGResponse`, and the UI uses it to attach thumbs/comment feedback via `POST /feedback/` → `langsmith.Client.create_feedback`.
 - Enable tracing by setting the standard LangSmith environment variables (see `env.example`):
   - `LANGSMITH_TRACING=true`
@@ -111,6 +149,7 @@ Both retrieval tools are *also* packaged as standalone **MCP servers** under `re
 ### Endpoints
 - `POST /rag/` — run the agentic RAG workflow for one user turn. **Streaming endpoint** (`text/event-stream`).
 - `POST /feedback/` — record thumbs (`feedback_score`: 0 or 1) and/or free-text feedback against a previous answer's `trace_id`.
+- `GET /photos/{photo_id}.jpg` — static photo file (served from the `data/raw/photos` bind-mount; returns 404 if no photo dir is mounted).
 
 ### `POST /rag/`
 
@@ -138,6 +177,8 @@ Two kinds of frames are emitted, in order:
    data: Looking for items: italian restaurants in paris.
 
    data: Fetching user reviews...
+
+   data: Pulling top photos and reviews...
    ```
 
 2. **Final frame** — exactly one JSON line at the end:
@@ -164,7 +205,11 @@ Two kinds of frames are emitted, in order:
          "reviews": 312,
          "categories": ["Pizza", "Italian"],
          "attributes": { "OutdoorSeating": true },
-         "hours": { "Monday": "11:0-22:0" }
+         "hours": { "Monday": "11:0-22:0" },
+         "photos": [
+           { "photo_id": "abc123", "url": "/photos/abc123.jpg", "caption": "patio at night", "label": "outside", "score": 0.31 }
+         ],
+         "top_review": "Outdoor seating with heaters made it comfortable in November. Pizza was great, especially the truffle special..."
        }
      ]
    }
@@ -255,7 +300,7 @@ api/src/api/
   agents/
     graph.py                # LangGraph workflow + State + agent_execution + rag_agent_stream_wrapper (SSE)
     agents.py               # intent_router_node, agent_node, structured response models
-    tools.py                # get_formatted_context + get_formatted_reviews_context + tracing
+    tools.py                # get_formatted_context + get_formatted_reviews_context + get_photos_for_businesses (CLIP+caption RRF) + get_top_review_for_businesses + @traceable spans
     prompts/
       intent_router_agent.yaml
       qa_agent.yaml
@@ -322,10 +367,8 @@ To run the serving API, you need to have the Qdrant collections populated (creat
 - `yelp-reviews-collection-00` — flat vectors + `business_id` / `text` payload, used by the reviews tool's RRF query.
 
 ## Roadmap (Next)
-- Photo embeddings / visual retrieval
 - Real-time website search
-- Review-text sentiment retrieval
-- Explicit "citations" attached to reviews/photos
+- Make it a multi agent system (restaurant search agent, order agent)
 - Recommendations
 - Turn the solution into a Voice agent
 - Deployment
